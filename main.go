@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/gin-gonic/gin"
 	"plutoploy/dns-manager/acme"
+	"plutoploy/dns-manager/store"
 )
 
 func main() {
@@ -14,6 +16,17 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "ok"})
 	})
+
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "dns-manager.db"
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		log.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
 
 	acmeCfg := acme.VerifierConfig{
 		DirectoryURL: os.Getenv("ACME_DIRECTORY_URL"),
@@ -23,7 +36,12 @@ func main() {
 		DNSNSName:    os.Getenv("ACME_DNS_NS"),
 		PublicIP:     os.Getenv("ACME_PUBLIC_IP"),
 	}
-	verifier := acme.NewVerifier(acmeCfg)
+	verifier := acme.NewVerifier(acmeCfg, db)
+
+	// Try to load a saved account from the database.
+	if err := verifier.LoadAccount(context.Background()); err != nil {
+		log.Printf("no saved account: %v", err)
+	}
 
 	// Start the authoritative DNS server that answers the delegated
 	// _acme-challenge TXT queries. Required for the automated flow.

@@ -14,3 +14,6 @@ ACME_PUBLIC_IP = ""       # public IP of this server (for NS/apex A records)
 
 # HTTP API
 LISTEN_ADDR = ":8080"
+
+# Persistence
+DB_PATH = "dns-manager.db"

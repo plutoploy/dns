@@ -7,6 +7,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +21,7 @@ import (
 	"github.com/go-acme/lego/v5/challenge/dns01"
 	"github.com/go-acme/lego/v5/lego"
 	"github.com/go-acme/lego/v5/registration"
+	"plutoploy/dns-manager/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -113,7 +116,7 @@ type VerifierConfig struct {
 	Email string
 
 	// KeyType is the type of private key to generate for the account.
-	// Defaults to EC256.
+	// Defaults to RSA4096.
 	KeyType KeyType
 
 	// Delegation DNS zone this service is authoritative for, e.g.
@@ -139,7 +142,7 @@ func (c *VerifierConfig) fill() {
 		c.DirectoryURL = lego.DirectoryURLLetsEncrypt
 	}
 	if c.KeyType == "" {
-		c.KeyType = KeyTypeEC256
+		c.KeyType = KeyTypeRSA4096
 	}
 	if c.DNSListen == "" {
 		c.DNSListen = ":53"
@@ -189,6 +192,7 @@ type Verifier struct {
 	dnsServer *DNSServer
 	txtStore  *TXTStore
 	account   *AccountInfo
+	store     *store.Store
 
 	mu sync.Mutex
 }
@@ -196,7 +200,7 @@ type Verifier struct {
 // NewVerifier creates an ACME verifier and its authoritative DNS server.
 // The DNS server is started with StartDNS; the account is registered with
 // RegisterAccount.
-func NewVerifier(cfg VerifierConfig) *Verifier {
+func NewVerifier(cfg VerifierConfig, st *store.Store) *Verifier {
 	cfg.fill()
 
 	txtStore := NewTXTStore()
@@ -212,6 +216,7 @@ func NewVerifier(cfg VerifierConfig) *Verifier {
 		txtStore:  txtStore,
 		dnsServer: dnsServer,
 		provider:  NewAutoDNSProvider(dnsServer, txtStore),
+		store:     st,
 	}
 }
 
@@ -277,7 +282,68 @@ func (v *Verifier) RegisterAccount(ctx context.Context) (*AccountInfo, error) {
 	}
 	v.account = info
 	slog.Info("ACME account registered", "email", info.Email, "uri", info.URI)
+
+	if v.store != nil {
+		keyPEM, err := marshalPrivateKey(key)
+		if err != nil {
+			return nil, fmt.Errorf("marshal private key: %w", err)
+		}
+		if err := v.store.SaveAccount(info.Email, info.URI, info.CA, keyPEM); err != nil {
+			slog.Warn("failed to persist account", "error", err)
+		}
+	}
+
 	return info, nil
+}
+
+// LoadAccount restores an account from the database and rebuilds the lego
+// client. Call this on startup instead of RegisterAccount when a saved
+// account exists.
+func (v *Verifier) LoadAccount(ctx context.Context) error {
+	if v.store == nil {
+		return errors.New("no store configured")
+	}
+
+	row, err := v.store.GetAccount(v.config.Email, v.config.DirectoryURL)
+	if err != nil {
+		return fmt.Errorf("account not found: %w", err)
+	}
+
+	key, err := parsePrivateKeyPEM(row.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("parse stored key: %w", err)
+	}
+
+	v.user = &AcmeUser{email: row.Email, key: key}
+
+	legoCfg := lego.NewConfig(v.user)
+	legoCfg.CADirURL = v.config.DirectoryURL
+	legoCfg.HTTPClient = v.config.HTTPClient
+
+	cl, err := lego.NewClient(legoCfg)
+	if err != nil {
+		return fmt.Errorf("create lego client: %w", err)
+	}
+	v.client = cl
+
+	if err := v.client.Challenge.SetDNS01Provider(v.provider); err != nil {
+		return fmt.Errorf("set DNS-01 provider: %w", err)
+	}
+
+	// Recover registration state
+	reg, err := v.client.Registration.ResolveAccountByKey(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve account: %w", err)
+	}
+	v.user.reg = reg
+
+	v.account = &AccountInfo{
+		Email: row.Email,
+		URI:   row.URI,
+		CA:    row.CA,
+	}
+	slog.Info("ACME account loaded from db", "email", row.Email, "uri", row.URI)
+	return nil
 }
 
 // Account returns the current registered account info, or nil.
@@ -318,6 +384,20 @@ func (v *Verifier) Obtain(ctx context.Context, domain string) (*CertificateResul
 	}
 
 	slog.Info("certificate issued", "domain", domain, "cert_url", res.CertURL)
+
+	if v.store != nil {
+		if err := v.store.SaveCertificate(
+			domain,
+			string(res.Certificate),
+			string(res.PrivateKey),
+			string(res.IssuerCertificate),
+			res.CertURL,
+			"valid",
+		); err != nil {
+			slog.Warn("failed to persist certificate", "error", err)
+		}
+	}
+
 	return &CertificateResult{
 		Domain:            domain,
 		Status:            "valid",
@@ -341,4 +421,28 @@ func generatePrivateKey(kt KeyType) (crypto.Signer, error) {
 	default:
 		return nil, fmt.Errorf("unsupported key type: %s", kt)
 	}
+}
+
+func marshalPrivateKey(key crypto.Signer) (string, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})), nil
+}
+
+func parsePrivateKeyPEM(pemStr string) (crypto.Signer, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("key does not implement crypto.Signer")
+	}
+	return signer, nil
 }

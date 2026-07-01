@@ -60,12 +60,21 @@ func (h *Handler) SetupHandler(c *gin.Context) {
 		return
 	}
 
+	cnameTarget := h.Verifier.CNAMETarget(req.Domain)
+
+	if h.Verifier.store != nil {
+		if err := h.Verifier.store.SaveDomain(req.Domain, cnameTarget); err != nil {
+			c.JSON(http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"domain": req.Domain,
 		"cname": gin.H{
 			"name":  "_acme-challenge." + req.Domain,
 			"type":  "CNAME",
-			"value": h.Verifier.CNAMETarget(req.Domain),
+			"value": cnameTarget,
 		},
 		"instructions": "Create this CNAME record once. After it resolves, call POST /acme/issue to obtain the certificate. Renewals need no further DNS changes.",
 	})
@@ -114,6 +123,35 @@ func (h *Handler) AccountHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, h.Verifier.Account())
 }
 
+// DomainsHandler handles GET /acme/domains
+func (h *Handler) DomainsHandler(c *gin.Context) {
+	if h.Verifier == nil || h.Verifier.store == nil {
+		c.JSON(http.StatusPreconditionFailed, errorResponse{Error: "store not configured"})
+		return
+	}
+	domains, err := h.Verifier.store.ListDomains()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, domains)
+}
+
+// CertsHandler handles GET /acme/certs?domain=
+func (h *Handler) CertsHandler(c *gin.Context) {
+	if h.Verifier == nil || h.Verifier.store == nil {
+		c.JSON(http.StatusPreconditionFailed, errorResponse{Error: "store not configured"})
+		return
+	}
+	domain := c.Query("domain")
+	certs, err := h.Verifier.store.ListCertificates(domain)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, certs)
+}
+
 // ---------------------------------------------------------------------------
 // Route setup
 // ---------------------------------------------------------------------------
@@ -126,4 +164,6 @@ func SetupRoutes(rg *gin.RouterGroup, v *Verifier) {
 	rg.POST("/setup", h.SetupHandler)
 	rg.POST("/issue", h.IssueHandler)
 	rg.GET("/account", h.AccountHandler)
+	rg.GET("/domains", h.DomainsHandler)
+	rg.GET("/certs", h.CertsHandler)
 }
