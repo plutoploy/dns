@@ -1,0 +1,8 @@
+[tools]
+go = "latest"
+
+[env]
+ACME_EMAIL = ""
+ACME_DIR = ""
+ACME_DNS_API = ""
+SERVICE_PORT = ""
