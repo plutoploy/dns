@@ -2,7 +2,15 @@
 go = "latest"
 
 [env]
-ACME_EMAIL = ""
-ACME_DIR = ""
-ACME_DNS_API = ""
-SERVICE_PORT = ""
+# ACME account
+ACME_ACCOUNT_EMAIL = ""
+ACME_DIRECTORY_URL = ""   # blank = Let's Encrypt production
+
+# Authoritative DNS server (CNAME delegation zone)
+ACME_DNS_ZONE = ""        # e.g. auth.example.com
+ACME_DNS_LISTEN = ":53"
+ACME_DNS_NS = ""          # e.g. ns1.auth.example.com (defaults to ns1.<zone>)
+ACME_PUBLIC_IP = ""       # public IP of this server (for NS/apex A records)
+
+# HTTP API
+LISTEN_ADDR = ":8080"

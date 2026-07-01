@@ -1,33 +1,45 @@
 package main
 
 import (
-	"github.com/gin-gonic/gin"
-	"github.com/mvrilo/go-redoc"
-	ginredoc "github.com/mvrilo/go-redoc/gin"
 	"log"
 	"net/http"
 	"os"
+
+	"github.com/gin-gonic/gin"
 	"plutoploy/dns-manager/acme"
 )
 
 func main() {
 	r := gin.Default()
-	doc := redoc.New(
-		redoc.WithTitle("DNS Resolver API"),
-		redoc.WithDescription("used with caddy"),
-	)
-	r.Use(ginredoc.New(doc))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "ok"})
 	})
+
 	acmeCfg := acme.VerifierConfig{
 		DirectoryURL: os.Getenv("ACME_DIRECTORY_URL"),
 		Email:        os.Getenv("ACME_ACCOUNT_EMAIL"),
-		DSN:          os.Getenv("ACME_DB"),
+		DNSZone:      os.Getenv("ACME_DNS_ZONE"),
+		DNSListen:    os.Getenv("ACME_DNS_LISTEN"),
+		DNSNSName:    os.Getenv("ACME_DNS_NS"),
+		PublicIP:     os.Getenv("ACME_PUBLIC_IP"),
 	}
 	verifier := acme.NewVerifier(acmeCfg)
+
+	// Start the authoritative DNS server that answers the delegated
+	// _acme-challenge TXT queries. Required for the automated flow.
+	if acmeCfg.DNSZone != "" {
+		go func() {
+			if err := verifier.StartDNS(); err != nil {
+				log.Fatalf("dns server: %v", err)
+			}
+		}()
+	} else {
+		log.Println("warning: ACME_DNS_ZONE not set; automated DNS-01 disabled")
+	}
+
 	acmeGroup := r.Group("/acme")
 	acme.SetupRoutes(acmeGroup, verifier)
+
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = ":8080"
